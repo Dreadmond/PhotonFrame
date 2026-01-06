@@ -60,9 +60,11 @@ static uint32_t readRegister24(uint8_t reg) {
 // =============================================================================
 
 void powerOnINA228() {
+    Serial.println("Powering on INA228...");
     pinMode(INA228_POWER_PIN, OUTPUT);
     digitalWrite(INA228_POWER_PIN, HIGH);
-    delay(10);  // Let power stabilize
+    delay(100);  // Let power stabilize (INA228 needs time to boot)
+    Serial.println("INA228 power on complete");
 }
 
 void powerOffINA228() {
@@ -81,12 +83,19 @@ void sleepINA228() {
 // =============================================================================
 
 bool initINA228() {
+    Serial.printf("Initializing I2C on SDA=%d, SCL=%d\n", I2C_SDA_PIN, I2C_SCL_PIN);
+
     // Initialize I2C bus
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
     Wire.setClock(400000);  // 400kHz I2C
+    delay(10);
+
+    Serial.printf("Scanning for INA228 at address 0x%02X...\n", INA228_I2C_ADDR);
 
     // Check manufacturer ID
     uint16_t mfgId = readRegister16(INA228_REG_MANUFACTURER_ID);
+    Serial.printf("Manufacturer ID read: 0x%04X\n", mfgId);
+
     if (mfgId != 0x5449) {
         Serial.printf("INA228 not found! (ID: 0x%04X, expected 0x5449)\n", mfgId);
         return false;

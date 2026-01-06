@@ -9,7 +9,7 @@ PhotonFrame is a FireBeetle ESP32-E powered 7.3" Spectra 6 (7-color) e-paper dis
 - Monitors solar panel power via INA228 sensor
 - Adjusts refresh intervals based on available power + battery voltage
 - Reports telemetry to Home Assistant via MQTT
-- Supports OTA updates from Nextcloud and GitHub
+- Supports OTA updates (Arduino OTA, Nextcloud, GitHub)
 
 ## Hardware Requirements
 
@@ -82,7 +82,9 @@ The INA228 measures current through its shunt resistor. Connect:
 - **VIN-**: To battery charging circuit (through shunt)
 - **VCC**: Connected to GPIO 13 for switchable power
 - **GND**: Common ground
-- **SDA/SCL**: I2C bus
+- **SDA/SCL**: I2C bus (GPIO 21/22)
+
+**I2C Address**: Default 0x40 (A0=GND, A1=GND)
 
 ## Software Setup
 
@@ -90,26 +92,25 @@ The INA228 measures current through its shunt resistor. Connect:
 
 Install [PlatformIO IDE](https://platformio.org/install/ide?install=vscode) for VS Code.
 
-### 2. Clone/Download Project
+### 2. Clone Project
 
 ```bash
 cd ~/Documents/PlatformIO/Projects
-git clone https://github.com/YourUsername/PhotonFrame.git
+git clone https://github.com/Dreadmond/PhotonFrame.git
 cd PhotonFrame
 ```
 
 ### 3. Configure Secrets
 
-Copy the example secrets file and edit with your credentials:
-
 ```bash
 cp secrets.example.h secrets.h
 ```
 
-Edit `secrets.h` with:
-- WiFi credentials
+Edit `secrets.h` with your credentials:
+- WiFi SSID and password
 - MQTT broker details
 - Nextcloud WebDAV URL and credentials
+- Arduino OTA password
 
 ### 4. Build and Upload
 
@@ -120,7 +121,7 @@ pio device monitor
 
 ## Intelligent Refresh Algorithm
 
-PhotonFrame uses a **hybrid power-aware** refresh algorithm that considers both battery voltage AND real-time solar power:
+PhotonFrame uses a **hybrid power-aware** refresh algorithm:
 
 | Battery | Solar Power | Refresh Interval | Power State |
 |---------|-------------|------------------|-------------|
@@ -139,18 +140,51 @@ PhotonFrame uses a **hybrid power-aware** refresh algorithm that considers both 
 - **Deep sleep**: ~10µA
 - **Indoor solar**: ~50-200µW typical
 
-With indoor solar producing ~50µA average, one refresh cycle needs ~8 hours to recover!
+## OTA Updates
+
+### Arduino OTA (Development)
+
+The device listens for Arduino OTA connections for 10 seconds after each boot.
+
+```bash
+# Upload via OTA (after initial USB flash)
+pio run -t upload --upload-port photonframe.local
+```
+
+**Credentials:**
+- Hostname: `photonframe.local`
+- Password: Set in `secrets.h` (default: `photonframe123`)
+
+To keep the device awake for OTA, send MQTT command:
+```json
+{"action": "ota_mode"}
+```
+Device stays awake for 5 minutes with blinking LED.
+
+### Nextcloud OTA (Production)
+
+1. Build: `pio run`
+2. Upload `.pio/build/firebeetle32/firmware.bin` to:
+   `/Shared/firmware/photonframe/firmware.bin`
+3. Device auto-updates on next boot
+4. File deleted after successful update
+
+### GitHub OTA (Fallback)
+
+1. Create GitHub release with tag `v1.x.x`
+2. Attach `firmware.bin` to release
+3. Device checks GitHub if no Nextcloud update
 
 ## MQTT Integration
 
 ### Topics
 
-| Topic | Type | Description |
-|-------|------|-------------|
-| `photonframe/state` | JSON | All sensor data (retained) |
-| `photonframe/availability` | String | `online`/`offline` (LWT) |
-| `photonframe/command` | JSON | Commands to device |
-| `photonframe/status` | String | Current status message |
+| Topic | Direction | Description |
+|-------|-----------|-------------|
+| `photonframe/state` | Out | All sensor data (JSON, retained) |
+| `photonframe/availability` | Out | `online`/`offline` (LWT) |
+| `photonframe/command` | In | Commands (JSON) |
+| `photonframe/status` | Out | Status messages |
 
 ### State Payload
 
@@ -179,164 +213,145 @@ With indoor solar producing ~50µA average, one refresh cycle needs ~8 hours to 
 
 Send JSON to `photonframe/command`:
 
-```json
-{"action": "update_display"}     // Force image refresh
-{"action": "reboot"}             // Restart device
-{"action": "check_ota"}          // Check for firmware update
-{"action": "get_status"}         // Force state publish
-{"action": "clear_errors"}       // Reset error counters
-{"action": "force_ha_discovery"} // Republish HA discovery configs
-```
+| Command | Description |
+|---------|-------------|
+| `{"action": "update_display"}` | Force image refresh on next boot |
+| `{"action": "reboot"}` | Restart device immediately |
+| `{"action": "check_ota"}` | Check Nextcloud/GitHub for updates |
+| `{"action": "ota_mode"}` | Stay awake 5 min for Arduino OTA |
+| `{"action": "clear_errors"}` | Reset error counters |
+| `{"action": "force_ha_discovery"}` | Republish HA discovery configs |
 
 ### Home Assistant Auto-Discovery
 
-PhotonFrame automatically registers sensors with Home Assistant via MQTT discovery. Sensors appear under a single device with:
+PhotonFrame registers sensors automatically via MQTT discovery:
 - Battery percentage & voltage
 - Solar voltage, current, power
 - INA228 temperature
 - Power state
+- Next refresh time
 - WiFi signal strength
-- Diagnostic sensors (boot count, errors, etc.)
+- Boot count, errors, firmware version
 
-## OTA Updates
-
-### Nextcloud OTA (Priority)
-
-1. Build firmware: `pio run`
-2. Upload `.pio/build/firebeetle32/firmware.bin` to Nextcloud:
-   `/Shared/firmware/photonframe/firmware.bin`
-3. Device checks on each boot and auto-updates
-4. File is deleted after successful update
-
-### GitHub OTA (Fallback)
-
-1. Create a GitHub release with tag `v1.x.x`
-2. Attach `firmware.bin` to the release
-3. Device checks GitHub if Nextcloud has no update
+Sensors use `expire_after: 90000` (25 hours) for deep-sleep compatibility.
 
 ## Nextcloud Image Setup
 
 ### Image Requirements
 
 - **Format**: PNG (8-bit RGB)
-- **Size**: 800x480 or will be scaled
-- **Colors**: Will be quantized to 7-color palette
+- **Resolution**: 800x480 (or will be scaled to fit)
+- **Max size**: 500KB
+- **Colors**: Automatically quantized to 7-color palette
 
-### Recommended Nextcloud Folder Structure
+### Folder Structure
 
 ```
-/Photos/EPaper/
-  ├── display.png      (primary image)
-  └── fallback.png     (backup image)
-
-/Shared/firmware/photonframe/
-  └── firmware.bin     (OTA updates)
+Nextcloud/
+├── Photos/EPaper/
+│   ├── display.png          # Primary image
+│   └── fallback.png         # Backup image
+└── Shared/firmware/photonframe/
+    └── firmware.bin         # OTA updates
 ```
-
-### Automatic Image Generation
-
-Consider using a Nextcloud Flow or external script to:
-1. Generate daily images (calendar, weather, photos)
-2. Resize/optimize for e-paper
-3. Save to the configured folder
 
 ## Troubleshooting
 
+### INA228 Not Detected
+
+Check serial output for:
+```
+Powering on INA228...
+Initializing I2C on SDA=21, SCL=22
+Scanning for INA228 at address 0x40...
+Manufacturer ID read: 0x5449   <- Should be 0x5449
+```
+
+If ID is `0x0000` or `0xFFFF`:
+1. Verify GPIO 13 is connected to INA228 VCC
+2. Check SDA (GPIO 21) and SCL (GPIO 22) connections
+3. Verify INA228 address matches (A0/A1 pins)
+
 ### Display Not Updating
 
-1. Check SPI wiring (especially BUSY pin)
-2. Verify display power (3.3V, not 5V!)
+1. Check SPI wiring, especially BUSY pin (GPIO 4)
+2. Verify display VCC is 3.3V (not 5V!)
 3. Check serial output for PNG decode errors
-4. Ensure image is valid PNG, not too large (<500KB)
+4. Ensure image is valid PNG, under 500KB
+
+### MQTT Unavailable in Home Assistant
+
+1. Device uses `expire_after` instead of availability topic
+2. Sensors stay valid for 25 hours during deep sleep
+3. Send `{"action": "force_ha_discovery"}` to republish configs
 
 ### WiFi Connection Issues
 
-1. Device creates `PhotonFrame-Setup` AP after failed connections
-2. Connect to AP, configure WiFi via captive portal
-3. Check serial output for connection attempts
-
-### INA228 Not Detected
-
-1. Verify I2C wiring (SDA/SCL not swapped)
-2. Check GPIO 13 is providing power to INA228
-3. Default I2C address is 0x40 (A0=GND, A1=GND)
-4. Try I2C scanner sketch to verify address
-
-### MQTT Not Publishing
-
-1. Verify broker IP/port in secrets.h
-2. Check MQTT username/password
-3. Ensure broker allows connections from device IP
-4. Check for firewall blocking port 1883
-
-### Low Battery Life
-
-1. Ensure INA228 is powered off during sleep (GPIO 13 LOW)
-2. Check display is in hibernate mode
-3. Verify deep sleep current (~10µA expected)
-4. Indoor solar may need larger panel for your lighting
+1. Device creates `PhotonFrame-Setup` AP if WiFi fails
+2. Connect to AP, configure via captive portal
+3. Check credentials in `secrets.h`
 
 ## Configuration Reference
 
-### config.h Constants
+### secrets.h
 
-| Constant | Default | Description |
-|----------|---------|-------------|
-| `INA228_ADDR` | 0x40 | I2C address |
-| `SHUNT_RESISTOR` | 0.015 | 15mΩ shunt value |
-| `VOLTAGE_CRITICAL` | 3.4V | Emergency sleep threshold |
+```cpp
+#define SECRET_WIFI_SSID     "YourWiFi"
+#define SECRET_WIFI_PASSWORD "YourPassword"
+
+#define SECRET_MQTT_BROKER    "192.168.1.100"
+#define SECRET_MQTT_PORT      1883
+#define SECRET_MQTT_USERNAME  "mqtt_user"
+#define SECRET_MQTT_PASSWORD  "mqtt_pass"
+#define SECRET_MQTT_CLIENT_ID "photonframe_001"
+
+#define SECRET_NEXTCLOUD_URL      "https://cloud.example.com/remote.php/dav/files/User/Photos/EPaper/"
+#define SECRET_NEXTCLOUD_USER     "username"
+#define SECRET_NEXTCLOUD_PASS     "app-password"
+#define SECRET_NEXTCLOUD_PHOTO    "display.png"
+#define SECRET_NEXTCLOUD_FALLBACK "fallback.png"
+
+#define OTA_HOSTNAME "photonframe"
+#define OTA_PASSWORD "photonframe123"
+```
+
+### config.h Defaults
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `INA228_I2C_ADDR` | 0x40 | I2C address |
+| `INA228_SHUNT_RESISTOR` | 0.015 | 15mΩ shunt |
+| `VOLTAGE_CRITICAL` | 3.4V | Emergency threshold |
 | `VOLTAGE_LOW` | 3.6V | Low battery threshold |
-| `VOLTAGE_FULL` | 3.9V | Full battery threshold |
-| `POWER_ABUNDANT_UW` | 100 | µW threshold for "abundant" |
-| `POWER_LOW_UW` | 50 | µW threshold for "low" |
-| `SLEEP_MIN_SECONDS` | 1800 | 30 min minimum refresh |
-| `SLEEP_MAX_SECONDS` | 86400 | 24 hour maximum refresh |
-
-### secrets.h Required Values
-
-| Secret | Description |
-|--------|-------------|
-| `SECRET_WIFI_SSID` | WiFi network name |
-| `SECRET_WIFI_PASSWORD` | WiFi password |
-| `SECRET_MQTT_BROKER` | MQTT broker IP/hostname |
-| `SECRET_MQTT_PORT` | MQTT port (usually 1883) |
-| `SECRET_MQTT_USERNAME` | MQTT username (or empty) |
-| `SECRET_MQTT_PASSWORD` | MQTT password (or empty) |
-| `SECRET_MQTT_CLIENT_ID` | Unique MQTT client ID |
-| `SECRET_NEXTCLOUD_URL` | WebDAV URL to image folder |
-| `SECRET_NEXTCLOUD_USER` | Nextcloud username |
-| `SECRET_NEXTCLOUD_PASS` | Nextcloud app password |
-| `SECRET_NEXTCLOUD_PHOTO` | Primary image filename |
-| `SECRET_NEXTCLOUD_FALLBACK` | Fallback image filename |
+| `VOLTAGE_MEDIUM` | 3.9V | Medium battery threshold |
+| `POWER_ABUNDANT_UW` | 100 | µW for "abundant" state |
+| `POWER_LOW_UW` | 50 | µW for "low" state |
 
 ## Project Structure
 
 ```
 PhotonFrame/
 ├── platformio.ini          # Build configuration
-├── secrets.h               # Your credentials (gitignored)
-├── secrets.example.h       # Template for secrets
-├── README.md               # This file
+├── secrets.h               # Credentials (gitignored)
+├── secrets.example.h       # Template
+├── README.md
 ├── src/
 │   ├── main.cpp            # Main firmware
 │   ├── config.h            # Pin definitions, constants
-│   ├── display.h           # Display interface
-│   ├── display.cpp         # Spectra 6 driver
-│   ├── power.h             # Power monitoring interface
-│   ├── power.cpp           # INA228 driver + sleep logic
-│   └── ota.h               # OTA update classes
+│   ├── display.h/cpp       # Spectra 6 e-paper driver
+│   ├── power.h/cpp         # INA228 driver, sleep logic
+│   └── ota.h               # Nextcloud/GitHub OTA
 └── docs/
     └── PINOUT.md           # Detailed wiring reference
 ```
 
 ## License
 
-MIT License - See LICENSE file for details.
+MIT License
 
 ## Credits
 
-Built on code from:
-- [INA228-Power-Monitor](https://github.com/...) - INA228 driver
-- [Paperlesspaper7](https://github.com/Dreadmond/paperlesspaper7-enhanced) - Display & MQTT code
 - [GxEPD2](https://github.com/ZinggJM/GxEPD2) - E-paper display library
 - [pngle](https://github.com/kikuchan/pngle) - PNG decoder
+- [PubSubClient](https://github.com/knolleary/pubsubclient) - MQTT client
+- [WiFiManager](https://github.com/tzapu/WiFiManager) - WiFi configuration

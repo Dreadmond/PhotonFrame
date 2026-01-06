@@ -56,6 +56,10 @@ RTC_DATA_ATTR uint32_t bootCount = 0;
 RTC_DATA_ATTR uint32_t totalErrorCount = 0;
 RTC_DATA_ATTR uint32_t successfulUpdates = 0;
 RTC_DATA_ATTR bool haDiscoveryPublished = false;
+RTC_DATA_ATTR uint32_t discoveryVersion = 0;  // Increment to force republish
+
+// Current discovery config version - increment when changing discovery format
+#define HA_DISCOVERY_VERSION 2
 
 // =============================================================================
 // UTILITY FUNCTIONS
@@ -224,11 +228,17 @@ bool connectMQTT() {
     mqttClient.setBufferSize(MQTT_BUFFER_SIZE);
     mqttClient.setKeepAlive(MQTT_KEEPALIVE);
 
+    // Connect with LWT (Last Will Testament) - QoS 1, retained
     if (mqttClient.connect(SECRET_MQTT_CLIENT_ID, SECRET_MQTT_USERNAME, SECRET_MQTT_PASSWORD,
-                           MQTT_TOPIC_AVAILABILITY, 0, true, "offline")) {
+                           MQTT_TOPIC_AVAILABILITY, 1, true, "offline")) {
         Serial.println("MQTT connected");
         mqttConnected = true;
-        mqttClient.subscribe(MQTT_TOPIC_COMMAND);
+
+        // Immediately publish online status (retained, QoS 1)
+        mqttClient.publish(MQTT_TOPIC_AVAILABILITY, "online", true);
+        mqttClient.loop();
+
+        mqttClient.subscribe(MQTT_TOPIC_COMMAND, 1);
         return true;
     }
 
@@ -239,8 +249,10 @@ bool connectMQTT() {
 
 void publishHADiscovery() {
     if (!mqttConnected) return;
-    if (haDiscoveryPublished && bootCount > 1) {
-        Serial.println("HA discovery already published");
+
+    // Check if we need to republish (version changed or first boot)
+    if (haDiscoveryPublished && discoveryVersion == HA_DISCOVERY_VERSION && bootCount > 1) {
+        Serial.println("HA discovery already published (v" + String(HA_DISCOVERY_VERSION) + ")");
         return;
     }
 
@@ -287,7 +299,10 @@ void publishHADiscovery() {
         doc["name"] = String(DEVICE_NAME) + " " + sensor.name;
         doc["state_topic"] = MQTT_TOPIC_STATE;
         doc["value_template"] = sensor.valueTemplate;
-        doc["availability_topic"] = MQTT_TOPIC_AVAILABILITY;
+
+        // For deep-sleep devices: don't use availability_topic, use expire_after instead
+        // State expires after 25 hours (max sleep is 24h)
+        doc["expire_after"] = 90000;
 
         if (sensor.unit) doc["unit_of_measurement"] = sensor.unit;
         if (sensor.deviceClass) doc["device_class"] = sensor.deviceClass;
@@ -303,6 +318,7 @@ void publishHADiscovery() {
 
     mqttClient.publish(MQTT_TOPIC_AVAILABILITY, "online", true);
     haDiscoveryPublished = true;
+    discoveryVersion = HA_DISCOVERY_VERSION;
 
     // Flush MQTT
     for (int i = 0; i < 10; i++) {
@@ -310,7 +326,7 @@ void publishHADiscovery() {
         delay(50);
     }
 
-    Serial.println("HA discovery published");
+    Serial.printf("HA discovery published (v%d)\n", HA_DISCOVERY_VERSION);
 }
 
 void publishState() {
@@ -501,13 +517,18 @@ void goToSleep(uint32_t seconds) {
     Serial.printf("Power state: %s\n", getPowerStateName(powerData.powerState));
     Serial.flush();
 
-    // Final MQTT publish
+    // Final MQTT publish - flush multiple times to ensure delivery
     if (mqttConnected) {
         mqttClient.publish(MQTT_TOPIC_STATUS, "sleeping", true);
-        mqttClient.loop();
-        delay(200);
+
+        // Flush MQTT buffer thoroughly
+        for (int i = 0; i < 20; i++) {
+            mqttClient.loop();
+            delay(50);
+        }
+
         mqttClient.disconnect();
-        delay(100);
+        delay(200);
     }
 
     // Put display to sleep
