@@ -24,6 +24,8 @@
 #include <WiFiManager.h>
 #include <esp_sleep.h>
 #include <esp_system.h>
+#include <esp_heap_caps.h>
+#include <LittleFS.h>
 
 // =============================================================================
 // GLOBAL OBJECTS
@@ -59,7 +61,7 @@ RTC_DATA_ATTR bool haDiscoveryPublished = false;
 RTC_DATA_ATTR uint32_t discoveryVersion = 0;  // Increment to force republish
 
 // Current discovery config version - increment when changing discovery format
-#define HA_DISCOVERY_VERSION 2
+#define HA_DISCOVERY_VERSION 4
 
 // =============================================================================
 // UTILITY FUNCTIONS
@@ -282,10 +284,11 @@ void publishHADiscovery() {
     SensorDef sensors[] = {
         {"battery", "Battery", "{{ value_json.battery_percentage }}", "%", "battery", "measurement", false},
         {"voltage", "Battery Voltage", "{{ value_json.battery_voltage }}", "V", "voltage", "measurement", false},
-        {"solar_voltage", "Solar Voltage", "{{ value_json.solar_voltage_mV }}", "mV", "voltage", "measurement", false},
-        {"solar_current", "Solar Current", "{{ value_json.solar_current_uA }}", "uA", "current", "measurement", false},
-        {"solar_power", "Solar Power", "{{ value_json.solar_power_uW }}", "uW", "power", "measurement", false},
-        {"ina_temp", "INA Temperature", "{{ value_json.ina_temperature }}", "°C", "temperature", "measurement", false},
+        // Solar sensors use non-standard units - no device_class to avoid HA validation errors
+        {"solar_voltage", "Solar Voltage", "{{ value_json.solar_voltage_mV }}", "mV", nullptr, "measurement", false},
+        {"solar_current", "Solar Current", "{{ value_json.solar_current_uA }}", "uA", nullptr, "measurement", false},
+        {"solar_power", "Solar Power", "{{ value_json.solar_power_uW }}", "uW", nullptr, "measurement", false},
+        {"ina_temp", "INA Temperature", "{{ value_json.ina_temperature }}", "C", "temperature", "measurement", false},
         {"power_state", "Power State", "{{ value_json.power_state }}", nullptr, nullptr, nullptr, false},
         {"next_refresh", "Next Refresh", "{{ value_json.next_refresh_seconds }}", "s", "duration", "measurement", false},
         {"wifi_rssi", "WiFi Signal", "{{ value_json.wifi_rssi }}", "dBm", "signal_strength", "measurement", false},
@@ -365,17 +368,24 @@ void publishState() {
 }
 
 // =============================================================================
-// NEXTCLOUD IMAGE FETCH
+// NEXTCLOUD IMAGE FETCH (with LittleFS caching to avoid RAM fragmentation)
 // =============================================================================
 
-bool fetchImageFromNextcloud(uint8_t** imageData, size_t* imageSize) {
-    if (!wifiConnected) {
-        logError("WiFi not connected");
+#define TEMP_IMAGE_PATH "/temp_image.png"
+
+bool initFileSystem() {
+    if (!LittleFS.begin(true)) {  // true = format if failed
+        Serial.println("LittleFS mount failed");
         return false;
     }
+    Serial.printf("LittleFS: %d bytes used, %d bytes total\n", 
+                  LittleFS.usedBytes(), LittleFS.totalBytes());
+    return true;
+}
 
-    String url = String(SECRET_NEXTCLOUD_URL) + SECRET_NEXTCLOUD_PHOTO;
-    Serial.printf("Fetching image: %s\n", url.c_str());
+bool downloadImageToFile(const String& url) {
+    Serial.printf("Downloading to flash: %s\n", url.c_str());
+    Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
 
     http.end();
     delay(100);
@@ -388,123 +398,143 @@ bool fetchImageFromNextcloud(uint8_t** imageData, size_t* imageSize) {
     int httpCode = http.GET();
     Serial.printf("HTTP response: %d\n", httpCode);
 
-    if (httpCode == HTTP_CODE_OK) {
-        *imageSize = http.getSize();
-        Serial.printf("Image size: %d bytes\n", *imageSize);
-
-        if (*imageSize > 0 && *imageSize < NEXTCLOUD_MAX_IMAGE_SIZE) {
-            *imageData = (uint8_t*)malloc(*imageSize);
-            if (*imageData != NULL) {
-                WiFiClient* stream = http.getStreamPtr();
-                if (stream == NULL) {
-                    logError("HTTP stream null");
-                    free(*imageData);
-                    *imageData = NULL;
-                    http.end();
-                    return false;
-                }
-
-                size_t totalRead = 0;
-                unsigned long lastActivity = millis();
-
-                while (totalRead < *imageSize) {
-                    if (millis() - lastActivity > 30000) {
-                        Serial.println("Stream timeout");
-                        break;
-                    }
-
-                    if (stream->available() == 0) {
-                        delay(10);
-                        continue;
-                    }
-
-                    size_t toRead = min((size_t)NEXTCLOUD_CHUNK_SIZE, *imageSize - totalRead);
-                    size_t bytesRead = stream->readBytes(*imageData + totalRead, toRead);
-
-                    if (bytesRead > 0) {
-                        totalRead += bytesRead;
-                        lastActivity = millis();
-
-                        if (totalRead % 10240 == 0 || totalRead == *imageSize) {
-                            Serial.printf("Downloaded: %d/%d (%.0f%%)\n",
-                                          totalRead, *imageSize, (totalRead * 100.0) / *imageSize);
-                        }
-                    }
-                    delay(5);
-                }
-
-                http.end();
-
-                if (totalRead == *imageSize) {
-                    Serial.println("Image download complete");
-                    return true;
-                }
-
-                logError("Incomplete download");
-                free(*imageData);
-                *imageData = NULL;
-                return false;
-            }
-            logError("Memory allocation failed");
-        } else {
-            logError("Invalid image size");
-        }
-    } else {
+    if (httpCode != HTTP_CODE_OK) {
         char buf[32];
         snprintf(buf, sizeof(buf), "HTTP error: %d", httpCode);
         logError(buf);
+        http.end();
+        return false;
     }
 
+    size_t imageSize = http.getSize();
+    Serial.printf("Image size: %d bytes\n", imageSize);
+
+    if (imageSize == 0 || imageSize >= NEXTCLOUD_MAX_IMAGE_SIZE) {
+        logError("Invalid image size");
+        http.end();
+        return false;
+    }
+
+    // Open file for writing
+    File file = LittleFS.open(TEMP_IMAGE_PATH, "w");
+    if (!file) {
+        logError("Failed to open file for writing");
+        http.end();
+        return false;
+    }
+
+    WiFiClient* stream = http.getStreamPtr();
+    if (stream == NULL) {
+        logError("HTTP stream null");
+        file.close();
+        http.end();
+        return false;
+    }
+
+    // Download to file in chunks (only need small buffer)
+    uint8_t buffer[1024];
+    size_t totalWritten = 0;
+    unsigned long lastActivity = millis();
+
+    while (totalWritten < imageSize) {
+        if (millis() - lastActivity > 30000) {
+            logError("Download timeout");
+            file.close();
+            LittleFS.remove(TEMP_IMAGE_PATH);
+            http.end();
+            return false;
+        }
+
+        int available = stream->available();
+        if (available == 0) {
+            delay(10);
+            continue;
+        }
+
+        size_t toRead = min((size_t)available, sizeof(buffer));
+        toRead = min(toRead, imageSize - totalWritten);
+        size_t bytesRead = stream->readBytes(buffer, toRead);
+
+        if (bytesRead > 0) {
+            size_t written = file.write(buffer, bytesRead);
+            if (written != bytesRead) {
+                logError("File write failed");
+                file.close();
+                LittleFS.remove(TEMP_IMAGE_PATH);
+                http.end();
+                return false;
+            }
+            totalWritten += written;
+            lastActivity = millis();
+
+            // Progress every 20KB
+            if (totalWritten % 20480 < 1024) {
+                Serial.printf("Downloading: %d/%d bytes (%.0f%%)\n", 
+                              totalWritten, imageSize, (totalWritten * 100.0) / imageSize);
+            }
+        }
+    }
+
+    file.close();
     http.end();
-    return false;
+
+    Serial.printf("Download complete: %d bytes saved to flash\n", totalWritten);
+    return totalWritten == imageSize;
+}
+
+bool displayImageFromFile() {
+    Serial.printf("Displaying PNG from file, free heap: %d bytes\n", ESP.getFreeHeap());
+    
+    // Stream directly from file to PNG decoder (never loads entire PNG to RAM)
+    bool success = displayPNGFromFile(TEMP_IMAGE_PATH);
+    
+    // Clean up temp file
+    LittleFS.remove(TEMP_IMAGE_PATH);
+    
+    if (success) {
+        Serial.println("Image displayed successfully");
+    } else {
+        logError("PNG decode failed");
+    }
+    
+    return success;
+}
+
+bool fetchAndDisplayImageFromNextcloud(const String& photoPath) {
+    if (!wifiConnected) {
+        logError("WiFi not connected");
+        return false;
+    }
+
+    String url = String(SECRET_NEXTCLOUD_URL) + photoPath;
+    
+    // Download to flash first (uses minimal RAM)
+    if (!downloadImageToFile(url)) {
+        return false;
+    }
+
+    // Display from flash (HTTP closed, more RAM available for buffer)
+    return displayImageFromFile();
 }
 
 void updateDisplay() {
     Serial.println("Updating display from Nextcloud...");
 
-    uint8_t* imageData = NULL;
-    size_t imageSize = 0;
-
-    if (fetchImageFromNextcloud(&imageData, &imageSize)) {
-        displayImageOnEPaper(imageData, imageSize);
+    // Try primary image (streaming - no large buffer needed)
+    if (fetchAndDisplayImageFromNextcloud(SECRET_NEXTCLOUD_PHOTO)) {
         successfulUpdates++;
-        Serial.println("Display updated successfully");
-
-        if (imageData != NULL) {
-            free(imageData);
-        }
-    } else {
-        // Try fallback image
-        Serial.println("Trying fallback image...");
-        String url = String(SECRET_NEXTCLOUD_URL) + SECRET_NEXTCLOUD_FALLBACK;
-
-        http.begin(url);
-        http.setAuthorization(SECRET_NEXTCLOUD_USER, SECRET_NEXTCLOUD_PASS);
-        http.setTimeout(NEXTCLOUD_TIMEOUT_MS);
-
-        if (http.GET() == HTTP_CODE_OK) {
-            imageSize = http.getSize();
-            if (imageSize > 0 && imageSize < NEXTCLOUD_MAX_IMAGE_SIZE) {
-                imageData = (uint8_t*)malloc(imageSize);
-                if (imageData != NULL) {
-                    WiFiClient* stream = http.getStreamPtr();
-                    size_t totalRead = stream->readBytes(imageData, imageSize);
-                    http.end();
-
-                    if (totalRead == imageSize) {
-                        displayImageOnEPaper(imageData, imageSize);
-                        successfulUpdates++;
-                    }
-                    free(imageData);
-                    return;
-                }
-            }
-        }
-        http.end();
-
-        // Show error on display
-        displayStatus("Image fetch failed", -1);
+        return;
     }
+    
+    // Try fallback image (also streaming)
+    Serial.println("Trying fallback image...");
+    if (fetchAndDisplayImageFromNextcloud(SECRET_NEXTCLOUD_FALLBACK)) {
+        successfulUpdates++;
+        return;
+    }
+
+    // Show error on display
+    displayStatus("Image fetch failed", -1);
 }
 
 // =============================================================================
@@ -568,6 +598,12 @@ void setup() {
     Serial.printf("PhotonFrame v%s\n", FIRMWARE_VERSION);
     Serial.printf("Boot #%d | Reset: %s\n", bootCount, getResetReason());
     Serial.println("========================================");
+    Serial.printf("Free heap at start: %d bytes\n", ESP.getFreeHeap());
+
+    // Initialize LittleFS for image caching
+    if (!initFileSystem()) {
+        Serial.println("WARNING: LittleFS init failed, image caching disabled");
+    }
 
     // 1. Power on and read INA228
     Serial.println("\n[1/6] Reading power metrics...");

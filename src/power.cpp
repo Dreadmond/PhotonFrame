@@ -147,8 +147,15 @@ float readCurrent() {
 }
 
 float readPower() {
-    uint32_t raw = readRegister24(INA228_REG_POWER);
-    return raw * 3.2f * currentLSB;  // Convert to watts
+    // For very low power (indoor solar), the POWER register can underflow to 0
+    // Calculate power from V×I for better resolution at low currents
+    float voltage = readBusVoltage();
+    float current = readCurrent();
+    
+    // Use absolute value of current (in case of measurement noise)
+    if (current < 0) current = -current;
+    
+    return voltage * current;  // Power in watts
 }
 
 float readINATemperature() {

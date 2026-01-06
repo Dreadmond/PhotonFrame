@@ -2,6 +2,8 @@
 #include "config.h"
 #include "pngle.h"
 #include <Adafruit_GFX.h>
+#include <esp_system.h>
+#include <LittleFS.h>
 
 // =============================================================================
 // DISPLAY OBJECT
@@ -21,9 +23,6 @@ static bool displayInitialized = false;
 // PNG decoder state
 static uint32_t pngWidth = 0;
 static uint32_t pngHeight = 0;
-static float pngScale = 1.0f;
-static int pngOffsetX = 0;
-static int pngOffsetY = 0;
 static bool pngDrawing = false;
 static uint8_t* pngDataPtr = NULL;
 static size_t pngDataSize = 0;
@@ -75,32 +74,29 @@ uint16_t rgbTo7Color(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 // =============================================================================
-// PNG DECODER CALLBACKS
+// PNG DECODER CALLBACKS (for pngle library)
 // =============================================================================
 
 void onPngInit(pngle_t* pngle, uint32_t w, uint32_t h) {
     pngWidth = w;
     pngHeight = h;
-
-    // Calculate scaling to fit display
-    float scaleX = (float)DISPLAY_WIDTH / (float)w;
-    float scaleY = (float)DISPLAY_HEIGHT / (float)h;
-    pngScale = (scaleX < scaleY) ? scaleX : scaleY;
-
-    int drawWidth = (int)(w * pngScale);
-    int drawHeight = (int)(h * pngScale);
-    pngOffsetX = (DISPLAY_WIDTH - drawWidth) / 2;
-    pngOffsetY = (DISPLAY_HEIGHT - drawHeight) / 2;
+    Serial.printf("PNG init: %dx%d\n", w, h);
 }
 
 void onPngDraw(pngle_t* pngle, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                const uint8_t rgba[4]) {
     if (!pngDrawing || x >= pngWidth || y >= pngHeight) return;
 
+    // Center the image on display
+    int offsetX = (DISPLAY_WIDTH - pngWidth) / 2;
+    int offsetY = (DISPLAY_HEIGHT - pngHeight) / 2;
+    if (offsetX < 0) offsetX = 0;
+    if (offsetY < 0) offsetY = 0;
+
     uint16_t color = rgbTo7Color(rgba[0], rgba[1], rgba[2]);
 
-    int drawX = pngOffsetX + (int)(x * pngScale);
-    int drawY = pngOffsetY + (int)(y * pngScale);
+    int drawX = offsetX + x;
+    int drawY = offsetY + y;
 
     if (drawX >= 0 && drawX < DISPLAY_WIDTH &&
         drawY >= 0 && drawY < DISPLAY_HEIGHT) {
@@ -109,7 +105,7 @@ void onPngDraw(pngle_t* pngle, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
 }
 
 void onPngDone(pngle_t* pngle) {
-    // Nothing needed
+    Serial.println("PNG decode complete");
 }
 
 // =============================================================================
@@ -117,7 +113,9 @@ void onPngDone(pngle_t* pngle) {
 // =============================================================================
 
 bool decodeAndDisplayPNG(uint8_t* pngData, size_t pngSize) {
-    Serial.println("Decoding PNG image...");
+    Serial.println("Decoding PNG with pngle...");
+    Serial.printf("PNG data size: %d bytes\n", pngSize);
+    Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
 
     // Verify PNG signature
     if (pngSize < 8 || pngData[0] != 0x89 || pngData[1] != 0x50 ||
@@ -136,39 +134,177 @@ bool decodeAndDisplayPNG(uint8_t* pngData, size_t pngSize) {
     pngDataPtr = pngData;
     pngDataSize = pngSize;
 
+    bool decodeSuccess = false;
+
     // Paging loop - decode PNG on every page pass
     display.firstPage();
     do {
         display.fillRect(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT, GxEPD_WHITE);
 
         pngle_t* pngle = pngle_new();
-        if (pngle != NULL) {
-            pngle_set_init_callback(pngle, onPngInit);
-            pngle_set_draw_callback(pngle, onPngDraw);
-            pngle_set_done_callback(pngle, onPngDone);
+        if (pngle == NULL) {
+            Serial.println("ERROR: Failed to create pngle decoder");
+            Serial.printf("Free heap when pngle_new failed: %d bytes\n", ESP.getFreeHeap());
+            continue;
+        }
+        
+        pngle_set_init_callback(pngle, onPngInit);
+        pngle_set_draw_callback(pngle, onPngDraw);
+        pngle_set_done_callback(pngle, onPngDone);
 
-            pngDrawing = true;
-            size_t fed = pngle_feed(pngle, pngDataPtr, pngDataSize);
-            pngDrawing = false;
-
-            pngle_destroy(pngle);
-
-            if (fed != pngDataSize) {
-                Serial.printf("WARNING: PNG feed incomplete: %d/%d\n",
-                              fed, pngDataSize);
+        pngDrawing = true;
+        
+        // Feed PNG in chunks to reduce peak memory
+        size_t offset = 0;
+        const size_t chunkSize = 4096;
+        int result = 0;
+        
+        while (offset < pngDataSize) {
+            size_t toFeed = (pngDataSize - offset < chunkSize) ? (pngDataSize - offset) : chunkSize;
+            result = pngle_feed(pngle, pngDataPtr + offset, toFeed);
+            if (result < 0) {
+                const char* error = pngle_error(pngle);
+                Serial.printf("ERROR: pngle_feed failed at %d: %s\n", offset, error ? error : "unknown");
+                break;
             }
+            offset += toFeed;
+        }
+        
+        pngDrawing = false;
+        pngle_destroy(pngle);
+
+        if (result >= 0 && pngWidth > 0 && pngHeight > 0) {
+            decodeSuccess = true;
         }
     } while (display.nextPage());
 
     pngDataPtr = NULL;
     pngDataSize = 0;
 
-    if (pngWidth > 0 && pngHeight > 0) {
+    if (decodeSuccess) {
         Serial.printf("PNG rendered: %dx%d\n", pngWidth, pngHeight);
         return true;
     }
 
     Serial.println("ERROR: PNG decode failed");
+    return false;
+}
+
+// =============================================================================
+// FILE-STREAMING PNG DECODE (Memory efficient - never loads entire PNG to RAM)
+// =============================================================================
+
+bool displayPNGFromFile(const char* filePath) {
+    Serial.printf("Streaming PNG from file: %s\n", filePath);
+    Serial.printf("Free heap before: %d bytes\n", ESP.getFreeHeap());
+    
+    File file = LittleFS.open(filePath, "r");
+    if (!file) {
+        Serial.println("ERROR: Failed to open PNG file");
+        return false;
+    }
+    
+    size_t fileSize = file.size();
+    Serial.printf("File size: %d bytes\n", fileSize);
+    
+    // Read and verify PNG signature
+    uint8_t header[8];
+    if (file.read(header, 8) != 8) {
+        Serial.println("ERROR: Failed to read PNG header");
+        file.close();
+        return false;
+    }
+    
+    if (header[0] != 0x89 || header[1] != 0x50 || 
+        header[2] != 0x4E || header[3] != 0x47) {
+        Serial.println("ERROR: Invalid PNG signature");
+        file.close();
+        return false;
+    }
+    
+    display.setRotation(0);
+    display.setFullWindow();
+    
+    // Reset state
+    pngWidth = 0;
+    pngHeight = 0;
+    
+    bool decodeSuccess = false;
+    
+    // Small chunk buffer - only 2KB needed at a time
+    const size_t chunkSize = 2048;
+    uint8_t* chunk = (uint8_t*)malloc(chunkSize);
+    if (chunk == NULL) {
+        Serial.println("ERROR: Failed to allocate chunk buffer");
+        file.close();
+        return false;
+    }
+    
+    Serial.printf("Free heap after chunk alloc: %d bytes\n", ESP.getFreeHeap());
+
+    // Paging loop - decode PNG on every page pass
+    display.firstPage();
+    do {
+        display.fillRect(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT, GxEPD_WHITE);
+        
+        // Seek back to start of file for each page
+        file.seek(0);
+        
+        pngle_t* pngle = pngle_new();
+        if (pngle == NULL) {
+            Serial.printf("ERROR: pngle_new failed, heap: %d\n", ESP.getFreeHeap());
+            continue;
+        }
+        
+        pngle_set_init_callback(pngle, onPngInit);
+        pngle_set_draw_callback(pngle, onPngDraw);
+        pngle_set_done_callback(pngle, onPngDone);
+        
+        pngDrawing = true;
+        
+        // Stream file to pngle in chunks
+        size_t totalFed = 0;
+        int result = 0;
+        
+        while (totalFed < fileSize && result >= 0) {
+            size_t toRead = min(chunkSize, fileSize - totalFed);
+            size_t bytesRead = file.read(chunk, toRead);
+            
+            if (bytesRead == 0) {
+                Serial.println("ERROR: File read returned 0");
+                break;
+            }
+            
+            result = pngle_feed(pngle, chunk, bytesRead);
+            if (result < 0) {
+                const char* error = pngle_error(pngle);
+                Serial.printf("ERROR: pngle_feed failed: %s\n", error ? error : "unknown");
+                break;
+            }
+            
+            totalFed += bytesRead;
+        }
+        
+        pngDrawing = false;
+        pngle_destroy(pngle);
+        
+        if (result >= 0 && pngWidth > 0 && pngHeight > 0) {
+            decodeSuccess = true;
+            Serial.printf("Page decoded: %dx%d\n", pngWidth, pngHeight);
+        }
+    } while (display.nextPage());
+    
+    free(chunk);
+    file.close();
+    
+    Serial.printf("Free heap after: %d bytes\n", ESP.getFreeHeap());
+    
+    if (decodeSuccess) {
+        Serial.printf("PNG rendered from file: %dx%d\n", pngWidth, pngHeight);
+        return true;
+    }
+    
+    Serial.println("ERROR: PNG file decode failed");
     return false;
 }
 

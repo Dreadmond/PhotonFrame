@@ -32,10 +32,15 @@ void resetDisplayInit();
 // IMAGE DISPLAY FUNCTIONS
 // =============================================================================
 
-// Display PNG image data on e-paper
+// Display PNG image data on e-paper (requires full image in RAM)
 // imageData: pointer to PNG file data
 // imageSize: size of PNG data in bytes
 void displayImageOnEPaper(uint8_t* imageData, size_t imageSize);
+
+// Display PNG directly from file (memory efficient - streams from flash)
+// filePath: path to PNG file in LittleFS
+// Returns true on success
+bool displayPNGFromFile(const char* filePath);
 
 // =============================================================================
 // STATUS DISPLAY FUNCTIONS
