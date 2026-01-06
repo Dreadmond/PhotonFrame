@@ -38,7 +38,7 @@ SPI (Spectra 6 Display)
   GPIO 18 ─────── SCK (Clock)
   GPIO 23 ─────── MOSI (DIN)
   GPIO 19 ─────── MISO (unused)
-  GPIO  5 ─────── CS (Chip Select)
+  GPIO  3 ─────── CS (Chip Select)
   GPIO 17 ─────── DC (Data/Command)
   GPIO 16 ─────── RST (Reset)
   GPIO  4 ─────── BUSY
@@ -61,7 +61,7 @@ Status
 │ VCC ─────┼────────┤ GPIO 13                             │    │              │
 │ GND ─────┼────────┤ GND                         GPIO 18 ├────┤ CLK          │
 │ SDA ─────┼────────┤ GPIO 21                     GPIO 23 ├────┤ DIN (MOSI)   │
-│ SCL ─────┼────────┤ GPIO 22                      GPIO 5 ├────┤ CS           │
+│ SCL ─────┼────────┤ GPIO 22                      GPIO 3 ├────┤ CS           │
 │          │        │                             GPIO 17 ├────┤ DC           │
 │ VIN+ ────┼─ Solar+│                             GPIO 16 ├────┤ RST          │
 │ VIN- ────┼─ Solar-│                              GPIO 4 ├────┤ BUSY         │

@@ -45,7 +45,7 @@
 #define SPI_MISO_PIN 19  // Not used by display, but defined for completeness
 
 // E-Paper Display Control Pins
-#define EPD_CS_PIN 5
+#define EPD_CS_PIN 3
 #define EPD_DC_PIN 17
 #define EPD_RST_PIN 16
 #define EPD_BUSY_PIN 4

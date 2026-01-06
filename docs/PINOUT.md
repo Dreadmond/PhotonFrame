@@ -17,7 +17,7 @@
 | SCK | 18 | SPI Clock |
 | MOSI | 23 | SPI Data Out (DIN on display) |
 | MISO | 19 | SPI Data In (not used by display) |
-| CS | 5 | Chip Select (active low) |
+| CS | 3 | Chip Select (active low) |
 | DC | 17 | Data/Command select |
 | RST | 16 | Reset (active low) |
 | BUSY | 4 | Busy status from display |
@@ -46,7 +46,7 @@
    │ GND ──┼────────┤ GND               │     │ VCC ──────────────┤── 3.3V
    │ SDA ──┼────────┤ GPIO 21      GPIO 18 ├───┤ CLK              │
    │ SCL ──┼────────┤ GPIO 22      GPIO 23 ├───┤ DIN (MOSI)       │
-   │       │        │               GPIO 5 ├───┤ CS               │
+   │       │        │               GPIO 3 ├───┤ CS               │
    │ VIN+ ─┼── +    │              GPIO 17 ├───┤ DC               │
    │ VIN- ─┼── -    │              GPIO 16 ├───┤ RST              │
    └───────┘        │               GPIO 4 ├───┤ BUSY             │
