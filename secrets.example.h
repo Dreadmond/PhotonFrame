@@ -37,7 +37,13 @@
 #define SECRET_NEXTCLOUD_FALLBACK "fallback.png"    // Fallback if primary fails
 
 // =============================================================================
-// OTA UPDATE CONFIGURATION
+// ARDUINO OTA (for development)
+// =============================================================================
+#define OTA_HOSTNAME "photonframe"
+#define OTA_PASSWORD "yourpassword"
+
+// =============================================================================
+// GITHUB OTA (optional fallback)
 // =============================================================================
 // GitHub repository for OTA updates (optional)
 // Format: username/repo

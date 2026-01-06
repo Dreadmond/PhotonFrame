@@ -7,6 +7,7 @@
  * - Nextcloud WebDAV image fetching
  * - MQTT integration with Home Assistant autodiscovery
  * - Dual OTA updates (Nextcloud priority, GitHub fallback)
+ * - Arduino OTA for development
  */
 
 #include "../secrets.h"
@@ -16,6 +17,7 @@
 #include "power.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <ArduinoOTA.h>
 #include <HTTPClient.h>
 #include <PubSubClient.h>
 #include <WiFi.h>
@@ -38,12 +40,16 @@ GitHubOTA githubOTA;
 // =============================================================================
 bool wifiConnected = false;
 bool mqttConnected = false;
+bool otaModeActive = false;
 unsigned long bootTime = 0;
 PowerReadings powerData = {0};
 
 // Error tracking
 uint32_t errorCount = 0;
 String lastError = "";
+
+// Arduino OTA window duration (seconds)
+#define ARDUINO_OTA_WINDOW_SECONDS 10
 
 // RTC memory (survives deep sleep)
 RTC_DATA_ATTR uint32_t bootCount = 0;
@@ -72,6 +78,54 @@ const char* getResetReason() {
         case ESP_RST_BROWNOUT: return "Brownout";
         default: return "Unknown";
     }
+}
+
+// =============================================================================
+// ARDUINO OTA FUNCTIONS
+// =============================================================================
+
+void setupArduinoOTA() {
+    ArduinoOTA.setHostname(OTA_HOSTNAME);
+    ArduinoOTA.setPassword(OTA_PASSWORD);
+
+    ArduinoOTA.onStart([]() {
+        String type = (ArduinoOTA.getCommand() == U_FLASH) ? "sketch" : "filesystem";
+        Serial.println("ArduinoOTA: Start updating " + type);
+    });
+
+    ArduinoOTA.onEnd([]() {
+        Serial.println("\nArduinoOTA: Update complete!");
+    });
+
+    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+        Serial.printf("ArduinoOTA: %u%%\r", (progress / (total / 100)));
+        // Blink LED during update
+        digitalWrite(LED_PIN, (progress / 1000) % 2);
+    });
+
+    ArduinoOTA.onError([](ota_error_t error) {
+        Serial.printf("ArduinoOTA Error[%u]: ", error);
+        if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+        else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+        else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+        else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+        else if (error == OTA_END_ERROR) Serial.println("End Failed");
+    });
+
+    ArduinoOTA.begin();
+    Serial.printf("ArduinoOTA ready: %s.local (password protected)\n", OTA_HOSTNAME);
+}
+
+void runArduinoOTAWindow(int seconds) {
+    Serial.printf("ArduinoOTA: Listening for %d seconds...\n", seconds);
+    unsigned long start = millis();
+
+    while (millis() - start < (seconds * 1000UL)) {
+        ArduinoOTA.handle();
+        delay(10);
+    }
+
+    Serial.println("ArduinoOTA: Window closed");
 }
 
 // =============================================================================
@@ -151,6 +205,10 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
             } else if (action == "force_ha_discovery") {
                 haDiscoveryPublished = false;
                 Serial.println("HA discovery will republish");
+            } else if (action == "ota_mode") {
+                Serial.println("Entering OTA mode - staying awake for updates");
+                otaModeActive = true;
+                mqttClient.publish(MQTT_TOPIC_STATUS, "ota_mode_active", true);
             }
         }
     }
@@ -505,15 +563,20 @@ void setup() {
     }
 
     // 3. Connect WiFi
-    Serial.println("\n[3/6] Connecting to WiFi...");
+    Serial.println("\n[3/7] Connecting to WiFi...");
     if (!connectWiFi()) {
         Serial.println("WiFi failed, sleeping...");
         goToSleep(WIFI_RETRY_SLEEP_SECONDS);
         return;
     }
 
-    // 4. Check for OTA updates
-    Serial.println("\n[4/6] Checking for OTA updates...");
+    // 4. Arduino OTA window
+    Serial.println("\n[4/7] Arduino OTA window...");
+    setupArduinoOTA();
+    runArduinoOTAWindow(ARDUINO_OTA_WINDOW_SECONDS);
+
+    // 5. Check for Nextcloud/GitHub OTA updates
+    Serial.println("\n[5/7] Checking for OTA updates...");
     if (wifiConnected) {
         if (nextcloudOTA.checkForUpdate()) {
             Serial.println("Nextcloud firmware found, updating...");
@@ -526,15 +589,15 @@ void setup() {
         }
     }
 
-    // 5. Connect MQTT and publish discovery
-    Serial.println("\n[5/6] Connecting to MQTT...");
+    // 6. Connect MQTT and publish discovery
+    Serial.println("\n[6/7] Connecting to MQTT...");
     if (connectMQTT()) {
         publishHADiscovery();
         publishState();
     }
 
-    // 6. Update display from Nextcloud
-    Serial.println("\n[6/6] Updating display...");
+    // 7. Update display from Nextcloud
+    Serial.println("\n[7/7] Updating display...");
     updateDisplay();
 
     // Final state publish
@@ -547,11 +610,32 @@ void setup() {
 }
 
 // =============================================================================
-// LOOP (not used - device sleeps after setup)
+// LOOP (handles OTA mode if activated via MQTT)
 // =============================================================================
 
 void loop() {
-    // Watchdog - should never reach here
+    // Handle Arduino OTA if in OTA mode
+    if (otaModeActive) {
+        ArduinoOTA.handle();
+        mqttClient.loop();
+
+        // Blink LED slowly to indicate OTA mode
+        static unsigned long lastBlink = 0;
+        if (millis() - lastBlink > 500) {
+            lastBlink = millis();
+            digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+        }
+
+        // Stay in OTA mode for up to 5 minutes, then sleep
+        if (millis() - bootTime > 300000) {
+            Serial.println("OTA mode timeout, sleeping...");
+            otaModeActive = false;
+            goToSleep(powerData.sleepSeconds);
+        }
+        return;
+    }
+
+    // Watchdog - should never reach here normally
     if (millis() - bootTime > WATCHDOG_TIMEOUT_MS) {
         Serial.println("WATCHDOG: Forcing sleep");
         goToSleep(powerData.sleepSeconds);
