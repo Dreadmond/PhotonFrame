@@ -51,6 +51,13 @@ float readBatteryVoltage();
 // Calculate battery percentage from voltage
 int calculateBatteryPercent(float voltage);
 
+// Check if battery is critically low and needs immediate shutdown
+// Returns true if voltage is below VOLTAGE_SHUTDOWN threshold
+bool isBatteryDangerous();
+
+// Check if battery is critically low (below VOLTAGE_CRITICAL)
+bool isBatteryCritical();
+
 // =============================================================================
 // POWER STATE CALCULATION
 // =============================================================================

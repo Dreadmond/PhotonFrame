@@ -151,10 +151,13 @@ float readPower() {
     // Calculate power from V×I for better resolution at low currents
     float voltage = readBusVoltage();
     float current = readCurrent();
-    
-    // Use absolute value of current (in case of measurement noise)
-    if (current < 0) current = -current;
-    
+
+    // Clamp negative current to zero for power calculation
+    // Negative current means reverse flow (no usable solar power)
+    // Using abs() here was a bug - it made reverse current appear as positive power,
+    // causing shorter sleep intervals even when solar wasn't actually charging
+    if (current < 0) current = 0;
+
     return voltage * current;  // Power in watts
 }
 
@@ -185,6 +188,33 @@ int calculateBatteryPercent(float voltage) {
     if (percent < 0.0f) percent = 0.0f;
 
     return (int)percent;
+}
+
+bool isBatteryDangerous() {
+    // Take multiple readings to avoid false triggers from ADC noise
+    float sum = 0;
+    for (int i = 0; i < 5; i++) {
+        sum += readBatteryVoltage();
+        delay(10);
+    }
+    float avgVoltage = sum / 5.0f;
+    
+    if (avgVoltage < VOLTAGE_SHUTDOWN) {
+        Serial.printf("DANGER: Battery at %.2fV (threshold: %.2fV) - SHUTDOWN REQUIRED\n", 
+                      avgVoltage, VOLTAGE_SHUTDOWN);
+        return true;
+    }
+    return false;
+}
+
+bool isBatteryCritical() {
+    float voltage = readBatteryVoltage();
+    if (voltage < VOLTAGE_CRITICAL) {
+        Serial.printf("WARNING: Battery at %.2fV (critical threshold: %.2fV)\n", 
+                      voltage, VOLTAGE_CRITICAL);
+        return true;
+    }
+    return false;
 }
 
 // =============================================================================

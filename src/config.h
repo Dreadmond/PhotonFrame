@@ -4,7 +4,7 @@
 // =============================================================================
 // FIRMWARE VERSION
 // =============================================================================
-#define FIRMWARE_VERSION "1.0.1"
+#define FIRMWARE_VERSION "1.0.3"
 #define FIRMWARE_BUILD_DATE __DATE__ " " __TIME__
 
 // =============================================================================
@@ -71,7 +71,8 @@
 #define BAT_ADC_VREF 3.3f
 
 // Voltage thresholds for power state decisions
-#define VOLTAGE_CRITICAL 3.4f    // Below: emergency mode (24h sleep)
+#define VOLTAGE_SHUTDOWN 3.2f    // Below: HARD SHUTDOWN - no wake until manual reset/charge
+#define VOLTAGE_CRITICAL 3.4f    // Below: emergency mode (24h sleep, skip display)
 #define VOLTAGE_LOW 3.6f         // Below: conserving mode
 #define VOLTAGE_MEDIUM 3.9f      // Below: neutral mode
 #define VOLTAGE_FULL 4.1f        // Above: abundant mode

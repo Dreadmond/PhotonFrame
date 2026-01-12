@@ -7,7 +7,6 @@
  * - Nextcloud WebDAV image fetching
  * - MQTT integration with Home Assistant autodiscovery
  * - Dual OTA updates (Nextcloud priority, GitHub fallback)
- * - Arduino OTA for development
  */
 
 #include "../secrets.h"
@@ -17,7 +16,6 @@
 #include "power.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include <ArduinoOTA.h>
 #include <HTTPClient.h>
 #include <PubSubClient.h>
 #include <WiFi.h>
@@ -42,16 +40,12 @@ GitHubOTA githubOTA;
 // =============================================================================
 bool wifiConnected = false;
 bool mqttConnected = false;
-bool otaModeActive = false;
 unsigned long bootTime = 0;
 PowerReadings powerData = {0};
 
 // Error tracking
 uint32_t errorCount = 0;
 String lastError = "";
-
-// Arduino OTA window duration (seconds)
-#define ARDUINO_OTA_WINDOW_SECONDS 10
 
 // RTC memory (survives deep sleep)
 RTC_DATA_ATTR uint32_t bootCount = 0;
@@ -84,54 +78,6 @@ const char* getResetReason() {
         case ESP_RST_BROWNOUT: return "Brownout";
         default: return "Unknown";
     }
-}
-
-// =============================================================================
-// ARDUINO OTA FUNCTIONS
-// =============================================================================
-
-void setupArduinoOTA() {
-    ArduinoOTA.setHostname(OTA_HOSTNAME);
-    ArduinoOTA.setPassword(OTA_PASSWORD);
-
-    ArduinoOTA.onStart([]() {
-        String type = (ArduinoOTA.getCommand() == U_FLASH) ? "sketch" : "filesystem";
-        Serial.println("ArduinoOTA: Start updating " + type);
-    });
-
-    ArduinoOTA.onEnd([]() {
-        Serial.println("\nArduinoOTA: Update complete!");
-    });
-
-    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-        Serial.printf("ArduinoOTA: %u%%\r", (progress / (total / 100)));
-        // Blink LED during update
-        digitalWrite(LED_PIN, (progress / 1000) % 2);
-    });
-
-    ArduinoOTA.onError([](ota_error_t error) {
-        Serial.printf("ArduinoOTA Error[%u]: ", error);
-        if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
-        else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
-        else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
-        else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
-        else if (error == OTA_END_ERROR) Serial.println("End Failed");
-    });
-
-    ArduinoOTA.begin();
-    Serial.printf("ArduinoOTA ready: %s.local (password protected)\n", OTA_HOSTNAME);
-}
-
-void runArduinoOTAWindow(int seconds) {
-    Serial.printf("ArduinoOTA: Listening for %d seconds...\n", seconds);
-    unsigned long start = millis();
-
-    while (millis() - start < (seconds * 1000UL)) {
-        ArduinoOTA.handle();
-        delay(10);
-    }
-
-    Serial.println("ArduinoOTA: Window closed");
 }
 
 // =============================================================================
@@ -211,10 +157,6 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
             } else if (action == "force_ha_discovery") {
                 haDiscoveryPublished = false;
                 Serial.println("HA discovery will republish");
-            } else if (action == "ota_mode") {
-                Serial.println("Entering OTA mode - staying awake for updates");
-                otaModeActive = true;
-                mqttClient.publish(MQTT_TOPIC_STATUS, "ota_mode_active", true);
             }
         }
     }
@@ -541,6 +483,32 @@ void updateDisplay() {
 // DEEP SLEEP
 // =============================================================================
 
+// =============================================================================
+// EMERGENCY SHUTDOWN - Battery dangerously low
+// =============================================================================
+// This function puts the device into indefinite hibernation.
+// It will NOT wake on a timer - only manual reset or charging will wake it.
+// This protects the LiPo from deep discharge damage.
+
+void emergencyShutdown(float voltage) {
+    Serial.printf("\n!!! EMERGENCY SHUTDOWN !!!\n");
+    Serial.printf("Battery voltage: %.2fV (threshold: %.2fV)\n", voltage, VOLTAGE_SHUTDOWN);
+    Serial.printf("Device will hibernate for 7 days to protect battery.\n");
+    Serial.flush();
+    
+    // Turn off everything - be careful, some pins may not be initialized
+    pinMode(LED_PIN, INPUT);
+    pinMode(INA228_POWER_PIN, OUTPUT);
+    digitalWrite(INA228_POWER_PIN, LOW);
+    
+    // Sleep for 7 days (maximum practical duration)
+    // This gives the battery time to recover via solar or manual charging
+    // After 7 days, it will wake and check again
+    const uint64_t SEVEN_DAYS_US = 7ULL * 24 * 60 * 60 * 1000000ULL;
+    esp_sleep_enable_timer_wakeup(SEVEN_DAYS_US);
+    esp_deep_sleep_start();
+}
+
 void goToSleep(uint32_t seconds) {
     Serial.printf("\n=== ENTERING DEEP SLEEP: %d seconds (%.1f hours) ===\n",
                   seconds, seconds / 3600.0);
@@ -583,6 +551,9 @@ void goToSleep(uint32_t seconds) {
 // SETUP
 // =============================================================================
 
+// Forward declaration for emergency shutdown
+void emergencyShutdown(float voltage);
+
 void setup() {
     Serial.begin(115200);
     delay(100);
@@ -600,6 +571,39 @@ void setup() {
     Serial.println("========================================");
     Serial.printf("Free heap at start: %d bytes\n", ESP.getFreeHeap());
 
+    // ==========================================================================
+    // CRITICAL: IMMEDIATE BATTERY CHECK - before ANY power-hungry operations!
+    // ==========================================================================
+    // Read battery voltage directly (no INA228 needed, uses ESP32 ADC)
+    float immediateVoltage = 0;
+    for (int i = 0; i < 5; i++) {
+        int adcValue = analogRead(BAT_ADC_PIN);
+        immediateVoltage += adcValue * BAT_ADC_MULTIPLIER * BAT_ADC_VREF / 4095.0f;
+        delay(10);
+    }
+    immediateVoltage /= 5.0f;
+    
+    Serial.printf("BATTERY CHECK: %.2fV\n", immediateVoltage);
+    
+    // HARD SHUTDOWN: Battery dangerously low - hibernate indefinitely
+    if (immediateVoltage < VOLTAGE_SHUTDOWN) {
+        emergencyShutdown(immediateVoltage);
+        return;  // Never reached
+    }
+    
+    // CRITICAL: Skip all non-essential operations, sleep immediately
+    if (immediateVoltage < VOLTAGE_CRITICAL) {
+        Serial.printf("CRITICAL BATTERY: %.2fV - skipping all operations, sleeping 24h\n", immediateVoltage);
+        
+        // Minimal cleanup - don't init display, WiFi, etc.
+        pinMode(LED_PIN, INPUT);
+        
+        // Sleep for 24 hours
+        esp_sleep_enable_timer_wakeup(SLEEP_EMERGENCY_SECONDS * 1000000ULL);
+        esp_deep_sleep_start();
+        return;  // Never reached
+    }
+
     // Initialize LittleFS for image caching
     if (!initFileSystem()) {
         Serial.println("WARNING: LittleFS init failed, image caching disabled");
@@ -612,6 +616,12 @@ void setup() {
         Serial.println("INA228 init failed, using defaults");
     }
     powerData = readAllPowerMetrics();
+    
+    // Re-check battery after full reading (more accurate with INA228)
+    if (powerData.batteryVoltage < VOLTAGE_SHUTDOWN) {
+        emergencyShutdown(powerData.batteryVoltage);
+        return;
+    }
 
     // 2. Initialize display
     Serial.println("\n[2/6] Initializing display...");
@@ -620,21 +630,19 @@ void setup() {
     }
 
     // 3. Connect WiFi
-    Serial.println("\n[3/7] Connecting to WiFi...");
+    Serial.println("\n[3/6] Connecting to WiFi...");
     if (!connectWiFi()) {
         Serial.println("WiFi failed, sleeping...");
         goToSleep(WIFI_RETRY_SLEEP_SECONDS);
         return;
     }
 
-    // 4. Arduino OTA window
-    Serial.println("\n[4/7] Arduino OTA window...");
-    setupArduinoOTA();
-    runArduinoOTAWindow(ARDUINO_OTA_WINDOW_SECONDS);
-
-    // 5. Check for Nextcloud/GitHub OTA updates
-    Serial.println("\n[5/7] Checking for OTA updates...");
-    if (wifiConnected) {
+    // 4. Check for Nextcloud/GitHub OTA updates
+    Serial.println("\n[4/6] Checking for OTA updates...");
+    // Skip OTA if battery is low - OTA is power-hungry and risky with low battery
+    if (powerData.batteryVoltage < VOLTAGE_LOW) {
+        Serial.printf("Skipping OTA check - battery low (%.2fV)\n", powerData.batteryVoltage);
+    } else if (wifiConnected) {
         if (nextcloudOTA.checkForUpdate()) {
             Serial.println("Nextcloud firmware found, updating...");
             nextcloudOTA.performUpdate();
@@ -647,15 +655,20 @@ void setup() {
     }
 
     // 6. Connect MQTT and publish discovery
-    Serial.println("\n[6/7] Connecting to MQTT...");
+    Serial.println("\n[5/6] Connecting to MQTT...");
     if (connectMQTT()) {
         publishHADiscovery();
         publishState();
     }
 
     // 7. Update display from Nextcloud
-    Serial.println("\n[7/7] Updating display...");
-    updateDisplay();
+    Serial.println("\n[6/6] Updating display...");
+    // Skip display update if battery is too low - display refresh uses significant power
+    if (powerData.batteryVoltage < VOLTAGE_LOW) {
+        Serial.printf("Skipping display update - battery low (%.2fV)\n", powerData.batteryVoltage);
+    } else {
+        updateDisplay();
+    }
 
     // Final state publish
     if (mqttConnected) {
@@ -667,31 +680,10 @@ void setup() {
 }
 
 // =============================================================================
-// LOOP (handles OTA mode if activated via MQTT)
+// LOOP (watchdog only - device should sleep before reaching here)
 // =============================================================================
 
 void loop() {
-    // Handle Arduino OTA if in OTA mode
-    if (otaModeActive) {
-        ArduinoOTA.handle();
-        mqttClient.loop();
-
-        // Blink LED slowly to indicate OTA mode
-        static unsigned long lastBlink = 0;
-        if (millis() - lastBlink > 500) {
-            lastBlink = millis();
-            digitalWrite(LED_PIN, !digitalRead(LED_PIN));
-        }
-
-        // Stay in OTA mode for up to 5 minutes, then sleep
-        if (millis() - bootTime > 300000) {
-            Serial.println("OTA mode timeout, sleeping...");
-            otaModeActive = false;
-            goToSleep(powerData.sleepSeconds);
-        }
-        return;
-    }
-
     // Watchdog - should never reach here normally
     if (millis() - bootTime > WATCHDOG_TIMEOUT_MS) {
         Serial.println("WATCHDOG: Forcing sleep");

@@ -257,6 +257,19 @@ Nextcloud/
 
 ## Troubleshooting
 
+### Excessive Battery Drain / Negative Solar Current
+
+If you observe:
+- Battery voltage steadily declining with no recovery
+- Solar current readings frequently negative (e.g., -50 to -150 µA)
+- Short sleep intervals despite low/no sunlight
+
+**Cause:** Prior to v1.0.2, a bug in `readPower()` used `abs(current)` instead of `max(0, current)`. This made negative (reverse) current appear as positive power, triggering shorter sleep intervals even when the solar panel wasn't actually charging the battery.
+
+**Solution:** Update to firmware v1.0.2 or later. The fix ensures negative current = 0 usable power, which correctly triggers longer sleep intervals (8-24 hours) when solar isn't providing charge.
+
+**Understanding negative current:** The INA228 on the high side of the solar panel measures current flowing INTO the energy harvester. Negative readings indicate reverse current flow (e.g., input capacitor discharge through the solar panel's internal resistance during low-light conditions). This is normal behavior but should not be counted as usable solar power.
+
 ### INA228 Not Detected
 
 Check serial output for:
@@ -344,6 +357,21 @@ PhotonFrame/
 └── docs/
     └── PINOUT.md           # Detailed wiring reference
 ```
+
+## Changelog
+
+### v1.0.2
+- **Fixed:** Power calculation bug that caused excessive battery drain
+  - `readPower()` now uses `max(0, current)` instead of `abs(current)`
+  - Negative solar current (reverse flow) correctly results in 0 power
+  - Longer sleep intervals now properly trigger when solar isn't charging
+
+### v1.0.1
+- Fixed PNG display rendering
+- Fixed indoor solar power measurement for low-current scenarios
+
+### v1.0.0
+- Initial release
 
 ## License
 
