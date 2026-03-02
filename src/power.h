@@ -59,14 +59,18 @@ bool isBatteryDangerous();
 bool isBatteryCritical();
 
 // =============================================================================
-// POWER STATE CALCULATION
+// ADAPTIVE SLEEP ALGORITHM
 // =============================================================================
 
-// Determine power state from battery voltage and solar power
-PowerState calculatePowerState(float batteryVoltage, float solarPowerUW);
+// Initialize adaptive sleep (call once at boot)
+void initAdaptiveSleep();
 
-// Calculate sleep duration based on power state
-uint32_t calculateSleepSeconds(float batteryVoltage, float solarPowerUW);
+// Calculate next sleep interval based on voltage trend
+// Returns sleep duration in seconds and updates internal state
+uint32_t calculateAdaptiveSleep(float currentVoltage);
+
+// Get current power state based on voltage trend
+PowerState getCurrentPowerState();
 
 // =============================================================================
 // COMBINED READING FUNCTION

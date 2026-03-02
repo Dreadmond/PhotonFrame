@@ -4,7 +4,7 @@
 // =============================================================================
 // FIRMWARE VERSION
 // =============================================================================
-#define FIRMWARE_VERSION "1.0.3"
+#define FIRMWARE_VERSION "1.5.0"
 #define FIRMWARE_BUILD_DATE __DATE__ " " __TIME__
 
 // =============================================================================
@@ -42,12 +42,12 @@
 // SPI Pins (Spectra 6 Display)
 #define SPI_SCK_PIN 18
 #define SPI_MOSI_PIN 23
-#define SPI_MISO_PIN 19  // Not used by display, but defined for completeness
+#define SPI_MISO_PIN 19 // Not used by display, but defined for completeness
 
 // E-Paper Display Control Pins
-#define EPD_CS_PIN 3
-#define EPD_DC_PIN 17
-#define EPD_RST_PIN 16
+#define EPD_CS_PIN 26
+#define EPD_DC_PIN 25
+#define EPD_RST_PIN 14
 #define EPD_BUSY_PIN 4
 
 // Battery Voltage ADC (FireBeetle ESP32-E built-in voltage divider)
@@ -59,9 +59,11 @@
 // =============================================================================
 // INA228 CONFIGURATION
 // =============================================================================
-#define INA228_I2C_ADDR 0x40     // Default address (A0=GND, A1=GND)
-#define INA228_SHUNT_RESISTOR 0.015f  // 15mΩ shunt (Adafruit INA228)
-#define INA228_MAX_CURRENT 0.1f  // Maximum expected current in Amps (100mA)
+#define INA228_I2C_ADDR 0x40         // Default address (A0=GND, A1=GND)
+#define INA228_SHUNT_RESISTOR 0.015f // 15mΩ shunt (Adafruit INA228)
+#define INA228_MAX_CURRENT 0.1f      // Maximum expected current in Amps (100mA)
+#define INA228_CURRENT_NOISE_FLOOR                                             \
+  0.00004f // 40µA - lowered from 100µA to match INA228 resolution (~21µA/LSB)
 
 // =============================================================================
 // BATTERY VOLTAGE THRESHOLDS
@@ -71,37 +73,44 @@
 #define BAT_ADC_VREF 3.3f
 
 // Voltage thresholds for power state decisions
-#define VOLTAGE_SHUTDOWN 3.2f    // Below: HARD SHUTDOWN - no wake until manual reset/charge
-#define VOLTAGE_CRITICAL 3.4f    // Below: emergency mode (24h sleep, skip display)
-#define VOLTAGE_LOW 3.6f         // Below: conserving mode
-#define VOLTAGE_MEDIUM 3.9f      // Below: neutral mode
-#define VOLTAGE_FULL 4.1f        // Above: abundant mode
+#define VOLTAGE_SHUTDOWN                                                       \
+  3.2f // Below: HARD SHUTDOWN - no wake until manual reset/charge
+#define VOLTAGE_CRITICAL 3.4f // Below: emergency mode (24h sleep, skip display)
+#define VOLTAGE_LOW 3.6f      // Below: conserving mode
+#define VOLTAGE_MEDIUM 3.9f   // Below: neutral mode
+#define VOLTAGE_FULL 4.1f     // Above: abundant mode
 
 // =============================================================================
-// SOLAR POWER THRESHOLDS (µW)
+// ADAPTIVE SLEEP ALGORITHM v2
 // =============================================================================
-#define POWER_ABUNDANT_UW 100.0f  // Good indoor light
-#define POWER_LOW_UW 50.0f        // Minimal light
+// Two-factor sleep calculation:
+// 1. Absolute voltage sets MINIMUM interval (can't go below this)
+// 2. Voltage trend over multiple boots adjusts interval upward when draining
 
-// =============================================================================
-// SLEEP INTERVALS (seconds)
-// =============================================================================
-// Based on power state matrix
-#define SLEEP_ABUNDANT_SECONDS (30 * 60)       // 30 minutes
-#define SLEEP_NEUTRAL_SECONDS (2 * 60 * 60)    // 2 hours
-#define SLEEP_CONSERVING_SECONDS (4 * 60 * 60) // 4 hours
-#define SLEEP_LOW_SECONDS (8 * 60 * 60)        // 8 hours
-#define SLEEP_EMERGENCY_SECONDS (24 * 60 * 60) // 24 hours
+// Sleep intervals based on absolute voltage level
+#define SLEEP_MIN_SECONDS (4 * 60 * 60)        // 4 hours (voltage > 3.9V)
+#define SLEEP_MEDIUM_SECONDS (4 * 60 * 60)     // 4 hours (3.6V-3.9V)
+#define SLEEP_LOW_SECONDS (8 * 60 * 60)        // 8 hours (3.4V-3.6V)
+#define SLEEP_EMERGENCY_SECONDS (24 * 60 * 60) // 24 hours (< 3.4V)
+#define SLEEP_MAX_SECONDS (24 * 60 * 60)       // 24 hours maximum
+
+// Starting point for adaptive algorithm
+#define SLEEP_DEFAULT_SECONDS (4 * 60 * 60) // 4 hours initial
+
+// Voltage trend thresholds (per cycle, averaged over history)
+// Any drain > 1mV/cycle triggers interval increase
+// Charging threshold must be positive to reduce interval
+#define VOLTAGE_CHARGING_THRESHOLD 0.005f // >5mV/cycle = charging
 
 // WiFi retry sleep
-#define WIFI_RETRY_SLEEP_SECONDS (30 * 60)     // 30 minutes
+#define WIFI_RETRY_SLEEP_SECONDS (30 * 60) // 30 minutes
 
 // =============================================================================
 // DISPLAY CONFIGURATION
 // =============================================================================
 #define DISPLAY_WIDTH 800
 #define DISPLAY_HEIGHT 480
-#define DISPLAY_REFRESH_MS (20 * 1000UL)  // 20 seconds for Spectra 6 refresh
+#define DISPLAY_REFRESH_MS (30 * 1000UL) // 30 seconds for Spectra 6 refresh
 
 // =============================================================================
 // MQTT CONFIGURATION
@@ -123,7 +132,7 @@
 #define OTA_NEXTCLOUD_PATH "/Shared/firmware/photonframe/firmware.bin"
 
 // GitHub repository for fallback OTA
-#define OTA_GITHUB_USER "PhotonFrame"  // Override in secrets.h
+#define OTA_GITHUB_USER "PhotonFrame" // Override in secrets.h
 #define OTA_GITHUB_REPO "PhotonFrame"
 #define OTA_GITHUB_TAG "v1.0.0"
 #define OTA_FIRMWARE_FILENAME "firmware.bin"
@@ -131,43 +140,52 @@
 // =============================================================================
 // NEXTCLOUD IMAGE CONFIGURATION
 // =============================================================================
-#define NEXTCLOUD_MAX_IMAGE_SIZE 500000  // 500KB max
-#define NEXTCLOUD_TIMEOUT_MS 60000       // 60 second timeout
-#define NEXTCLOUD_CHUNK_SIZE 4096        // 4KB download chunks
+#define NEXTCLOUD_MAX_IMAGE_SIZE 500000 // 500KB max
+#define NEXTCLOUD_TIMEOUT_MS 60000      // 60 second timeout
+#define NEXTCLOUD_CHUNK_SIZE 4096       // 4KB download chunks
 
 // =============================================================================
 // TIMING CONFIGURATION
 // =============================================================================
-#define WIFI_CONNECT_TIMEOUT_MS 15000    // 15 seconds
-#define WIFI_CONNECT_ATTEMPTS 30         // Number of 500ms attempts
+#define WIFI_CONNECT_TIMEOUT_MS 15000 // 15 seconds
+#define WIFI_CONNECT_ATTEMPTS 16      // Number of 500ms attempts (8 seconds max)
 
 // Watchdog timeout - force sleep after this time
-#define WATCHDOG_TIMEOUT_MS 120000       // 2 minutes
+#define WATCHDOG_TIMEOUT_MS 120000 // 2 minutes
 
 // Home Assistant discovery republish interval (in boot cycles)
 #define HA_DISCOVERY_INTERVAL 20
+
+// OTA check interval - only check every Nth boot to save power (~daily at 4h)
+#define OTA_CHECK_INTERVAL 6
 
 // =============================================================================
 // POWER STATE ENUMERATION
 // =============================================================================
 enum PowerState {
-    POWER_ABUNDANT,    // Battery full, good solar
-    POWER_NEUTRAL,     // Battery good, some solar
-    POWER_CONSERVING,  // Battery medium/low, minimal solar
-    POWER_LOW,         // Battery low, no solar
-    POWER_EMERGENCY    // Battery critical
+  POWER_CHARGING, // Battery voltage rising
+  POWER_STABLE,   // Battery voltage stable
+  POWER_DRAINING, // Battery voltage falling slowly
+  POWER_CRITICAL, // Battery voltage falling fast or very low
+  POWER_EMERGENCY // Battery dangerously low
 };
 
 // Power state names for MQTT
-inline const char* getPowerStateName(PowerState state) {
-    switch (state) {
-        case POWER_ABUNDANT: return "abundant";
-        case POWER_NEUTRAL: return "neutral";
-        case POWER_CONSERVING: return "conserving";
-        case POWER_LOW: return "low";
-        case POWER_EMERGENCY: return "emergency";
-        default: return "unknown";
-    }
+inline const char *getPowerStateName(PowerState state) {
+  switch (state) {
+  case POWER_CHARGING:
+    return "charging";
+  case POWER_STABLE:
+    return "stable";
+  case POWER_DRAINING:
+    return "draining";
+  case POWER_CRITICAL:
+    return "critical";
+  case POWER_EMERGENCY:
+    return "emergency";
+  default:
+    return "unknown";
+  }
 }
 
 #endif // CONFIG_H
